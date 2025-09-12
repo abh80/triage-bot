@@ -1,0 +1,421 @@
+bot_username: platuserbot
+
+resource_rules:
+  hooks:
+    - name: Add labels command for issue or merge request author or assignee
+      use_command_framework: true
+      command: '{{...labels}}'
+      on: note
+      conditions:
+        js: (hook_rest_body.issue || hook_rest_body.merge_request) && (hook_rest_body['user']['id'] === (hook_rest_body['issue']?.['author_id'] || hook_rest_body['merge_request']?.['author_id']) || (hook_rest_body['issue']?.['assignee_ids'] || hook_rest_body['merge_request']?.['assignee_ids'] || []).includes(hook_rest_body['user']['id']))
+      actions:
+        labels:
+          - '{{...labels}}'
+
+    - name: Add labels command for group members
+      use_command_framework: true
+      command: '{{...labels}}'
+      on: note
+      conditions:
+        js: (hook_rest_body.issue || hook_rest_body.merge_request) && !(hook_rest_body['user']['id'] === (hook_rest_body['issue']?.['author_id'] || hook_rest_body['merge_request']?.['author_id']) || (hook_rest_body['issue']?.['assignee_ids'] || hook_rest_body['merge_request']?.['assignee_ids'] || []).includes(hook_rest_body['user']['id']))
+        author_member:
+          source: group
+          condition: member_of
+          source_id: 107905131
+      actions:
+        labels:
+          - '{{...labels}}'
+
+    - name: Remove labels command for issue or merge request author or assignee
+      use_command_framework: true
+      command: 'rm {{...labels}}'
+      on: note
+      conditions:
+        js: (hook_rest_body.issue || hook_rest_body.merge_request) && (hook_rest_body['user']['id'] === (hook_rest_body['issue']?.['author_id'] || hook_rest_body['merge_request']?.['author_id']) || (hook_rest_body['issue']?.['assignee_ids'] || hook_rest_body['merge_request']?.['assignee_ids'] || []).includes(hook_rest_body['user']['id']))
+      actions:
+        remove_labels:
+          - '{{...labels}}'
+
+    - name: Remove labels command for group members
+      use_command_framework: true
+      command: 'rm {{...labels}}'
+      on: note
+      conditions:
+        js: (hook_rest_body.issue || hook_rest_body.merge_request) && !(hook_rest_body['user']['id'] === (hook_rest_body['issue']?.['author_id'] || hook_rest_body['merge_request']?.['author_id']) || (hook_rest_body['issue']?.['assignee_ids'] || hook_rest_body['merge_request']?.['assignee_ids'] || []).includes(hook_rest_body['user']['id']))
+        author_member:
+          source: group
+          condition: member_of
+          source_id: 107905131
+      actions:
+        remove_labels:
+          - '{{...labels}}'
+
+    - name: Add ready for review when ready
+      use_command_framework: true
+      command: 'ready'
+      on: note
+      conditions:
+        js: (hook_rest_body.issue || hook_rest_body.merge_request) && (hook_rest_body['user']['id'] === (hook_rest_body['issue']?.['author_id'] || hook_rest_body['merge_request']?.['author_id']) || (hook_rest_body['issue']?.['assignee_ids'] || hook_rest_body['merge_request']?.['assignee_ids'] || []).includes(hook_rest_body['user']['id']))
+        forbidden_labels:
+          - workflow::ready for review
+          - workflow::blocked
+          - unassigned
+      actions:
+        labels:
+          - workflow::ready for review
+        remove_labels:
+          - workflow::triage
+        comment: |
+          The issue or merge request will be marked as ready for review, please wait until all approvals are met.
+          Do not merge the merge request, it will be merged automatically when all approvals are met.
+
+    - name: Add approved label when approved
+      on: merge_request
+      conditions:
+        labels:
+          - workflow::ready for review
+        js: (hook_rest_body.object_attributes.action == 'approved')
+      actions:
+        labels:
+          - workflow::will merge
+          - approved
+        remove_labels:
+          - workflow::ready for review
+          - workflow::blocked
+          - workflow::triage
+        merge:
+          mergeWhenPipelineSucceeds: true
+        comment: |
+          The merge request has been approved and will be merged when all checks pass.
+    - name: Remove approved label when unapproved
+      on: merge_request
+      conditions:
+        labels:
+          - workflow::will merge
+          - approved
+        js: (hook_rest_body.object_attributes.action == 'unapproved')
+      actions:
+        remove_labels:
+          - workflow::will merge
+          - approved
+        comment: |
+          The merge request has been unapproved and will not be merged until it is approved again.
+        merge:
+          cancel: true
+
+
+  issue:
+    allow_on_hooks: true
+    rules:
+      - name: Comment when no labels are added
+        conditions:
+          state: opened
+          labels:
+            - None
+        actions:
+          comment: |
+            {{author}}, this issue has no labels. Please add relevant labels (e.g., ~frontend, ~backend, ~type::bug) to help with categorization.
+
+      - name: Set initial workflow stage
+        conditions:
+          state: opened
+          forbidden_labels:
+            - workflow::triage
+            - workflow::investigation
+            - workflow::in progress
+        actions:
+          labels:
+            - workflow::triage
+
+      - name: Ensure only one workflow label (triage vs investigation)
+        conditions:
+          state: opened
+          labels:
+            - workflow::triage
+            - workflow::investigation
+          forbidden_labels:
+            - workflow::in progress
+        actions:
+          remove_labels:
+            - workflow::triage
+
+      - name: Ensure only one workflow label (investigation vs in progress)
+        conditions:
+          state: opened
+          labels:
+            - workflow::investigation
+            - workflow::in progress
+        actions:
+          remove_labels:
+            - workflow::investigation
+
+      - name: Ensure only one workflow label (triage vs in progress)
+        conditions:
+          state: opened
+          labels:
+            - workflow::triage
+            - workflow::in progress
+        actions:
+          remove_labels:
+            - workflow::triage
+
+      - name: Remove help-needed and unassigned labels on assigned issues
+        conditions:
+          state: opened
+          js: resource["assignees"].length > 0
+          labels:
+            - help-needed::{triage,investigation,in progress}
+            - unassigned
+        actions:
+          remove_labels:
+            - help-needed::triage
+            - help-needed::investigation
+            - help-needed::in progress
+            - unassigned
+
+      - name: Add help-needed::triage and unassigned labels on unassigned triage issues
+        conditions:
+          state: opened
+          js: resource["assignees"].length === 0
+          labels:
+            - workflow::triage
+          forbidden_labels:
+            - help-needed::triage
+            - unassigned
+        actions:
+          labels:
+            - help-needed::triage
+            - unassigned
+
+      - name: Remove incorrect help-needed labels for triage stage
+        conditions:
+          state: opened
+          labels:
+            - workflow::triage
+            - help-needed::{investigation,in progress}
+        actions:
+          remove_labels:
+            - help-needed::investigation
+            - help-needed::in progress
+
+      - name: Add help-needed::investigation and unassigned labels on unassigned investigation issues
+        conditions:
+          state: opened
+          js: resource["assignees"].length === 0
+          labels:
+            - workflow::investigation
+          forbidden_labels:
+            - help-needed::investigation
+            - unassigned
+        actions:
+          labels:
+            - help-needed::investigation
+            - unassigned
+
+      - name: Remove incorrect help-needed labels for investigation stage
+        conditions:
+          state: opened
+          labels:
+            - workflow::investigation
+            - help-needed::{triage,in progress}
+        actions:
+          remove_labels:
+            - help-needed::triage
+            - help-needed::in progress
+
+      - name: Add help-needed::in progress and unassigned labels on unassigned in progress issues
+        conditions:
+          state: opened
+          js: resource["assignees"].length === 0
+          labels:
+            - workflow::in progress
+          forbidden_labels:
+            - help-needed::in progress
+            - unassigned
+        actions:
+          labels:
+            - help-needed::in progress
+            - unassigned
+
+      - name: Remove incorrect help-needed labels for in progress stage
+        conditions:
+          state: opened
+          labels:
+            - workflow::in progress
+            - help-needed::{triage,investigation}
+        actions:
+          remove_labels:
+            - help-needed::triage
+            - help-needed::investigation
+
+      - name: Remove triaged labels if not in triage stage
+        conditions:
+          state: opened
+          forbidden_labels:
+            - workflow::triage
+          labels:
+            - triaged::{bug,RFE}
+        actions:
+          remove_labels:
+            - triaged::bug
+            - triaged::RFE
+
+      - name: Ensure only one triaged label
+        conditions:
+          state: opened
+          labels:
+            - triaged::bug
+            - triaged::RFE
+        actions:
+          remove_labels:
+            - triaged::RFE
+
+      - name: Mark issue as stale after 4 months of inactivity
+        conditions:
+          state: opened
+          date:
+            attribute: updated_at
+            condition: older_than
+            interval_type: months
+            interval: 4
+          forbidden_labels:
+            - stale
+        actions:
+          comment: |
+            This issue has been inactive for 4 months and is now marked as stale. Contributions are welcome to move it forward!
+          labels:
+            - stale
+
+      - name: Remove stale label on activity
+        conditions:
+          state: opened
+          labels:
+            - stale
+          date:
+            attribute: updated_at
+            condition: newer_than
+            interval_type: hours
+            interval: 1
+        actions:
+          remove_labels:
+            - stale
+          comment: |
+            Activity detected on this issue. The stale label has been removed.
+
+  merge_request:
+    allow_on_hooks: true
+    rules:
+      - name: Comment when no labels are added
+        conditions:
+          state: opened
+          labels:
+            - None
+        actions:
+          extension: 'migrate_issue_labels_to_mr_extension.js'
+          comment: |
+            {{author}}, this merge request has no labels. Please add relevant labels (e.g., ~frontend, ~backend) to aid triage.
+            You can also use this bot ex: `@platuserbot ~label1 ~label2` to add labels to this issue.
+
+      - name: Set initial workflow stage for MRs
+        conditions:
+          state: opened
+          forbidden_labels:
+            - workflow::triage
+            - workflow::ready for review
+            - workflow::blocked
+        actions:
+          labels:
+            - workflow::triage
+          comment: |
+            {{author}} when you are ready for review please comment `@platuserbot ready`.
+            Please make sure all necessary labels are added, do not add `workflow::labels`
+
+      - name: Ensure only one workflow label (triage vs ready for review)
+        conditions:
+          state: opened
+          labels:
+            - workflow::triage
+            - workflow::ready for review
+        actions:
+          remove_labels:
+            - workflow::triage
+
+      - name: Ensure only one workflow label (triage vs blocked)
+        conditions:
+          state: opened
+          labels:
+            - workflow::triage
+            - workflow::blocked
+        actions:
+          remove_labels:
+            - workflow::triage
+
+      - name: Ensure only one workflow label (ready for review vs blocked)
+        conditions:
+          state: opened
+          labels:
+            - workflow::ready for review
+            - workflow::blocked
+        actions:
+          remove_labels:
+            - workflow::ready for review
+
+      - name: Add help-needed::triage and unassigned labels on unassigned MRs
+        conditions:
+          state: opened
+          js: resource["assignees"].length === 0
+          labels:
+            - workflow::triage
+          forbidden_labels:
+            - help-needed::triage
+            - unassigned
+        actions:
+          labels:
+            - help-needed::triage
+            - unassigned
+
+      - name: Remove help-needed and unassigned labels on assigned MRs
+        conditions:
+          state: opened
+          js: resource["assignees"].length > 0
+          labels:
+            - help-needed::{triage,ready for review,blocked}
+            - unassigned
+        actions:
+          remove_labels:
+            - help-needed::triage
+            - help-needed::ready for review
+            - help-needed::blocked
+            - unassigned
+
+      - name: Mark merge request as stale after 2 months of inactivity
+        conditions:
+          state: opened
+          date:
+            attribute: updated_at
+            condition: older_than
+            interval_type: months
+            interval: 2
+          forbidden_labels:
+            - stale
+        actions:
+          comment: |
+            {{author}}, this merge request has been inactive for 2 months and is now marked as stale. Please update or close it.
+          labels:
+            - stale
+
+      - name: Remove stale label on MR activity
+        conditions:
+          state: opened
+          labels:
+            - stale
+          date:
+            attribute: updated_at
+            condition: newer_than
+            interval_type: hours
+            interval: 1
+        actions:
+          remove_labels:
+            - stale
+          comment: |
+            Activity detected on this merge request. The stale label has been removed.
